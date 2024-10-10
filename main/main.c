@@ -18,6 +18,8 @@
 #define WIFI_SSID "ESP32_AP"
 #define WIFI_PASS ""
 
+#define MAX_STORED_MESSAGES 20
+
 static const char *TAG = "TWAI_APP";
 
 // Queue to store filtered 0x762 messages
@@ -28,6 +30,10 @@ typedef struct {
     twai_message_t message;
     const char* status;
 } message_with_status_t;
+
+// Array to store the last N messages
+message_with_status_t stored_messages[MAX_STORED_MESSAGES];
+int stored_message_count = 0;
 
 // Define the TWAI messages to be sent
 twai_message_t messages_to_send[] = {
@@ -40,14 +46,12 @@ twai_message_t messages_to_send[] = {
     {.identifier = 0x742, .data_length_code = 8, .data = {0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}}
 };
 
-void twai_send_task(void *pvParameters) {
-    while (1) {
-        for (int i = 0; i < sizeof(messages_to_send) / sizeof(messages_to_send[0]); i++) {
-            ESP_ERROR_CHECK(twai_transmit(&messages_to_send[i], pdMS_TO_TICKS(1000)));
-            ESP_LOGI(TAG, "Message sent: ID=0x%03" PRIx32 ", DLC=%d", messages_to_send[i].identifier, messages_to_send[i].data_length_code);
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second between messages
-        }
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Wait 5 seconds before sending the sequence again
+// Function to send TWAI messages
+void send_twai_messages() {
+    for (int i = 0; i < sizeof(messages_to_send) / sizeof(messages_to_send[0]); i++) {
+        ESP_ERROR_CHECK(twai_transmit(&messages_to_send[i], pdMS_TO_TICKS(1000)));
+        ESP_LOGI(TAG, "Message sent: ID=0x%03" PRIx32 ", DLC=%d", messages_to_send[i].identifier, messages_to_send[i].data_length_code);
+        vTaskDelay(pdMS_TO_TICKS(100)); // Small delay between messages
     }
 }
 
@@ -66,8 +70,16 @@ void twai_receive_task(void *pvParameters) {
                 }
                 printf(", Status: %s\n", message_with_status.status);
                 
-                // Send the filtered message with status to the queue
-                xQueueSend(message_queue, &message_with_status, portMAX_DELAY);
+                // Store the message in the array
+                if (stored_message_count < MAX_STORED_MESSAGES) {
+                    stored_messages[stored_message_count++] = message_with_status;
+                } else {
+                    // Shift messages to make room for the new one
+                    for (int i = 0; i < MAX_STORED_MESSAGES - 1; i++) {
+                        stored_messages[i] = stored_messages[i + 1];
+                    }
+                    stored_messages[MAX_STORED_MESSAGES - 1] = message_with_status;
+                }
             }
         }
     }
@@ -101,28 +113,61 @@ void wifi_init_softap() {
 
 // Modified HTTP GET handler
 esp_err_t get_handler(httpd_req_t *req) {
-    char response[2048];
-    char *p = response;
-    p += sprintf(p, "<html><body><h1>Filtered 0x762 Messages (byte0=0x23, byte1=0x00)</h1><ul>");
-
-    message_with_status_t message_with_status;
-    while (xQueueReceive(message_queue, &message_with_status, 0) == pdTRUE) {
-        p += sprintf(p, "<li>ID: 0x762, Data: ");
-        for (int i = 0; i < message_with_status.message.data_length_code; i++) {
-            p += sprintf(p, "%02X ", message_with_status.message.data[i]);
-        }
-        p += sprintf(p, ", Status: %s</li>", message_with_status.status);
+    char *response = malloc(8192);  // Increased buffer size
+    if (response == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for response");
+        return ESP_FAIL;
     }
 
-    p += sprintf(p, "</ul></body></html>");
+    char *p = response;
+    p += sprintf(p, "<html><body>");
+    p += sprintf(p, "<h1>TWAI Control Panel</h1>");
+    p += sprintf(p, "<button onclick='sendMessages()'>Send 0x742 Messages</button>");
+    p += sprintf(p, "<div id='status'></div>");
+    p += sprintf(p, "<h2>Filtered 0x762 Messages (byte0=0x23, byte1=0x00)</h2><ul id='messageList'>");
+
+    for (int i = 0; i < stored_message_count; i++) {
+        p += sprintf(p, "<li>ID: 0x762, Data: ");
+        for (int j = 0; j < stored_messages[i].message.data_length_code; j++) {
+            p += sprintf(p, "%02X ", stored_messages[i].message.data[j]);
+        }
+        p += sprintf(p, ", Status: %s</li>", stored_messages[i].status);
+    }
+
+    p += sprintf(p, "</ul>");
+    p += sprintf(p, "<script>");
+    p += sprintf(p, "function sendMessages() {");
+    p += sprintf(p, "  fetch('/send', { method: 'POST' })");
+    p += sprintf(p, "    .then(response => response.text())");
+    p += sprintf(p, "    .then(data => {");
+    p += sprintf(p, "      document.getElementById('status').innerHTML = '<p>Messages sent successfully</p>';");
+    p += sprintf(p, "      setTimeout(() => location.reload(), 1000);");
+    p += sprintf(p, "    })");
+    p += sprintf(p, "    .catch(error => {");
+    p += sprintf(p, "      console.error('Error:', error);");
+    p += sprintf(p, "      document.getElementById('status').innerHTML = '<p>Error sending messages</p>';");
+    p += sprintf(p, "    });");
+    p += sprintf(p, "}");
+    p += sprintf(p, "setInterval(() => location.reload(), 5000);");
+    p += sprintf(p, "</script>");
+    p += sprintf(p, "</body></html>");
 
     httpd_resp_send(req, response, strlen(response));
+    free(response);
+    return ESP_OK;
+}
+
+// Simplified handler for sending TWAI messages
+esp_err_t send_handler(httpd_req_t *req) {
+    send_twai_messages();
+    httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
 
 // Function to start the webserver
 httpd_handle_t start_webserver() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 8192;
     httpd_handle_t server = NULL;
 
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -133,6 +178,14 @@ httpd_handle_t start_webserver() {
             .user_ctx  = NULL
         };
         httpd_register_uri_handler(server, &uri_get);
+
+        httpd_uri_t uri_send = {
+            .uri       = "/send",
+            .method    = HTTP_POST,
+            .handler   = send_handler,
+            .user_ctx  = NULL
+        };
+        httpd_register_uri_handler(server, &uri_send);
     }
     return server;
 }
@@ -157,13 +210,6 @@ void app_main() {
         ESP_LOGI(TAG, "Webserver started successfully");
     }
 
-    // Create message queue
-    message_queue = xQueueCreate(15, sizeof(message_with_status_t));
-    if (message_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create message queue");
-        return;
-    }
-
     // Initialize TWAI driver
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_GPIO_NUM, RX_GPIO_NUM, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
@@ -174,7 +220,6 @@ void app_main() {
 
     ESP_LOGI(TAG, "TWAI driver installed and started");
 
-    // Create tasks for sending and receiving TWAI messages
-    xTaskCreate(twai_send_task, "TWAI_send_task", 2048, NULL, 5, NULL);
+    // Create task for receiving TWAI messages
     xTaskCreate(twai_receive_task, "TWAI_receive_task", 2048, NULL, 5, NULL);
 }
