@@ -20,8 +20,14 @@
 
 static const char *TAG = "TWAI_APP";
 
-// Queue to store received 0x762 messages
+// Queue to store filtered 0x762 messages
 QueueHandle_t message_queue;
+
+// Structure to store message and status
+typedef struct {
+    twai_message_t message;
+    const char* status;
+} message_with_status_t;
 
 // Define the TWAI messages to be sent
 twai_message_t messages_to_send[] = {
@@ -47,17 +53,21 @@ void twai_send_task(void *pvParameters) {
 
 void twai_receive_task(void *pvParameters) {
     twai_message_t rx_message;
+    message_with_status_t message_with_status;
     while (1) {
         if (twai_receive(&rx_message, pdMS_TO_TICKS(1000)) == ESP_OK) {
-            if (rx_message.identifier == 0x762) {
-                ESP_LOGI(TAG, "Received message: ID=0x%03" PRIx32 ", DLC=%d, Data=", rx_message.identifier, rx_message.data_length_code);
+            if (rx_message.identifier == 0x762 && rx_message.data[0] == 0x23 && rx_message.data[1] == 0x00) {
+                message_with_status.message = rx_message;
+                message_with_status.status = (rx_message.data[2] == 0x88) ? "Status 4" : "Status 3";
+                
+                ESP_LOGI(TAG, "Filtered message: ID=0x%03" PRIx32 ", DLC=%d, Data=", rx_message.identifier, rx_message.data_length_code);
                 for (int i = 0; i < rx_message.data_length_code; i++) {
                     printf("%02X ", rx_message.data[i]);
                 }
-                printf("\n");
+                printf(", Status: %s\n", message_with_status.status);
                 
-                // Send the message to the queue
-                xQueueSend(message_queue, &rx_message, portMAX_DELAY);
+                // Send the filtered message with status to the queue
+                xQueueSend(message_queue, &message_with_status, portMAX_DELAY);
             }
         }
     }
@@ -89,19 +99,19 @@ void wifi_init_softap() {
     ESP_LOGI(TAG, "WiFi AP started. SSID:%s (Open Network)", WIFI_SSID);
 }
 
-// HTTP GET handler
+// Modified HTTP GET handler
 esp_err_t get_handler(httpd_req_t *req) {
-    char response[1024];
+    char response[2048];
     char *p = response;
-    p += sprintf(p, "<html><body><h1>Received 0x762 Messages</h1><ul>");
+    p += sprintf(p, "<html><body><h1>Filtered 0x762 Messages (byte0=0x23, byte1=0x00)</h1><ul>");
 
-    twai_message_t rx_message;
-    while (xQueueReceive(message_queue, &rx_message, 0) == pdTRUE) {
+    message_with_status_t message_with_status;
+    while (xQueueReceive(message_queue, &message_with_status, 0) == pdTRUE) {
         p += sprintf(p, "<li>ID: 0x762, Data: ");
-        for (int i = 0; i < rx_message.data_length_code; i++) {
-            p += sprintf(p, "%02X ", rx_message.data[i]);
+        for (int i = 0; i < message_with_status.message.data_length_code; i++) {
+            p += sprintf(p, "%02X ", message_with_status.message.data[i]);
         }
-        p += sprintf(p, "</li>");
+        p += sprintf(p, ", Status: %s</li>", message_with_status.status);
     }
 
     p += sprintf(p, "</ul></body></html>");
@@ -140,10 +150,19 @@ void app_main() {
     wifi_init_softap();
 
     // Start the webserver
-    start_webserver();
+    httpd_handle_t server = start_webserver();
+    if (server == NULL) {
+        ESP_LOGE(TAG, "Failed to start webserver");
+    } else {
+        ESP_LOGI(TAG, "Webserver started successfully");
+    }
 
     // Create message queue
-    message_queue = xQueueCreate(15, sizeof(twai_message_t));
+    message_queue = xQueueCreate(15, sizeof(message_with_status_t));
+    if (message_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create message queue");
+        return;
+    }
 
     // Initialize TWAI driver
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_GPIO_NUM, RX_GPIO_NUM, TWAI_MODE_NORMAL);
