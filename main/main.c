@@ -122,7 +122,7 @@ esp_err_t get_handler(httpd_req_t *req) {
     char *p = response;
     p += sprintf(p, "<html><body>");
     p += sprintf(p, "<h1>TWAI Control Panel</h1>");
-    p += sprintf(p, "<button onclick='sendMessages()'>Comprobar estado de la configuración</button>");
+    p += sprintf(p, "<button onclick='sendMessages()'>Comprobar estado de la configuracion de angulo de volante</button>");
     p += sprintf(p, "<div id='status'></div>");
     p += sprintf(p, "<h2>Filtered 0x762 Messages (byte0=0x23, byte1=0x00)</h2><ul id='messageList'>");
 
