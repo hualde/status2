@@ -62,7 +62,8 @@ void twai_receive_task(void *pvParameters) {
         if (twai_receive(&rx_message, pdMS_TO_TICKS(1000)) == ESP_OK) {
             if (rx_message.identifier == 0x762 && rx_message.data[0] == 0x23 && rx_message.data[1] == 0x00) {
                 message_with_status.message = rx_message;
-                message_with_status.status = (rx_message.data[2] == 0x88) ? "Status 4" : "Status 3";
+                // Check the fourth byte (index 3) for status
+                message_with_status.status = ((rx_message.data[3] & 0x0F) == 0x0C) ? "Status 4" : "Status 3";
                 
                 ESP_LOGI(TAG, "Filtered message: ID=0x%03" PRIx32 ", DLC=%d, Data=", rx_message.identifier, rx_message.data_length_code);
                 for (int i = 0; i < rx_message.data_length_code; i++) {
